@@ -1,0 +1,1275 @@
+#!/usr/bin/perl
+
+#####################################################################
+#
+# Squid Graph version 3.2
+# https://github.com/detach8/squid-graph
+#
+# This program is distributed under the GNU General Public License
+# See LICENSE for full license information.
+#
+#####################################################################
+
+use strict;
+use GD;
+
+# Program version (DO NOT TOUCH THIS)
+my $VER = "3.2 release";
+
+# Enable console logging? (1 = on, 0 = off)
+my $CONSOLELOG = 1;
+
+# "Global" variables (DO NOT TOUCH THESE)
+my %config; # configuration details here
+my %color;  # colours configuration
+
+# Define graph colours [RRR,GGG,BBB]
+$color{'bg'}   = ['F5','F5','F5']; # graph background color
+$color{'fg'}   = ['00','00','00']; # graph foreground color
+$color{'gr'}   = ['00','00','FF']; # graph total line color
+$color{'hit'}  = ['FF','00','00']; # graph hit line color
+$color{'miss'} = ['00','FF','00']; # graph miss line color
+$color{'ims'}  = ['FF','00','FF']; # graph ims hit line color
+$color{'hbg'}  = ['FF','FF','FF']; # html report background color
+
+############ DO NOT EDIT ANYTHING BELOW THIS LINE ##############
+
+# Forward subroutine declaration
+sub main();		# main program body
+sub error($);		# error(string: $msg);
+sub warning($);		# warning(string: $msg);
+sub console_log($);	# console_log(string: $msg);
+sub parse_argv();	# requires defined %config
+sub config_check();	# requires defined %config
+sub create_gd();	# returns $imgAccess, $graphAccess;
+sub write_img($$);	# write image to file
+sub plot($$\$\@\@\@\@);	# plot($type,$gdimg,@totalData,@hitData,@missData,$imsData);
+sub hr_units($);	# hr_units(int: $num);
+sub hr_bytes($);	# hr_bytes(int: $num);
+sub hr_digits($$);	# hr_digits(int: $num, char: $units);
+sub dec_truncate($$);	# dec_truncate($num,$decplaces);
+sub comma_sep($);	# comma_sep($num);
+sub help();		# help(string: $helpCmd);
+
+# Parse and check arguments
+parse_argv();
+if (config_check()) {
+	main();
+}
+else {
+	error("Configuration check failed.");
+}
+
+# Main subroutine
+sub main() {
+
+	#
+	# NOTES
+	#
+	# Graph stats: Total, Hit, Miss, IMS/Err
+	#		TCP, UDP
+	#		Access, Transfer
+	#
+
+	my ($have_tcp, $have_udp) = (0,0);
+	my $have_cumulative = 0;
+	my $have_transfer = 1;
+	my $logStart = 0;
+	my $title = "Squid Graph Logfile Analysis Report";
+	my $graphLength = 60*60*24; # Graph is 24 hours long
+	my $progStart = $^T;
+	my $progSpeed = 0;
+	my $duration = 0;
+	my $lineCounter = 0;
+	my $errorLines = 0;
+
+	# Statistics data
+	my @tcpAccessTotal;
+	my @tcpAccessHit;
+	my @tcpAccessMiss;
+	my @tcpAccessIMS;
+	my @tcpTransferTotal;
+	my @tcpTransferHit;
+	my @tcpTransferMiss;
+	my @tcpTransferIMS;
+	my @tcpTimeTotal;
+	my @tcpTimeHit;
+	my @tcpTimeMiss;
+	my @tcpTimeIMS;
+	my @udpAccessTotal;
+	my @udpAccessHit;
+	my @udpAccessMiss;
+	my @udpTransferTotal;
+	my @udpTransferHit;
+	my @udpTransferMiss;
+	my @udpTimeTotal;
+	my @udpTimeHit;
+	my @udpTimeMiss;
+
+	# Image objects
+	my ($tcpAccessImg, $tcpTransferImg, $tcpTimeImg);
+	my ($udpAccessImg, $udpTransferImg, $udpTimeImg);
+
+	# Stats counter
+	my $i = 0;
+
+	console_log("Squid-graph $VER OK. Program started.");
+	console_log("Graph domain is $graphLength seconds.");
+
+	# Report title specified
+	if (exists $config{'title'}) {
+		$title = $config{'title'};
+	}
+	console_log("Setting report title to \"$title\".");
+
+	# Determine if cumulative graps were configured
+	if (exists $config{'cumulative'}) {
+		console_log("Configured for cumulative curves.");
+		$have_cumulative = 1;
+	}
+	else {
+		console_log("Configured for default histograms.");
+	}
+
+	# Determine if TCP or UDP configured
+	if (exists $config{'tcp-only'}) {
+		console_log('Configured have_tcp.');
+		($have_tcp, $have_udp) = (1,0);
+	}
+	elsif (exists $config{'udp-only'}) {
+		console_log('Configured have_udp.');
+		($have_tcp, $have_udp) = (0,1);
+	}
+	else {
+		console_log('Configured have_tcp and have_udp.');
+		($have_tcp, $have_udp) = (1,1);
+	}
+
+	# Determine have_transfer
+	if (exists $config{'no-transfer-duration'}) {
+		console_log("Transfer duration graph(s) disabled.");
+		$have_transfer = 0;
+	}
+	elsif ($have_cumulative) {
+		console_log("Transfer duration graph(s) automatically disabled.");
+		$have_transfer = 0;
+	}
+	else {
+		console_log("Transfer duration graph(s) enabled.");
+	}
+
+	# Was --start or --end specified?
+	if (exists $config{'start'}) {
+		$logStart = $config{'start'};
+	}
+	elsif (exists $config{'end'}) {
+		$logStart = $config{'end'} - $graphLength;
+	}
+	else {
+		$logStart = time() - $graphLength;
+	}
+	console_log("Configured start time to $logStart.");
+
+	# Are we ready?
+	console_log("Reading STDIN for logfile input.");
+
+	foreach (<STDIN>) {
+		# Increment line counter
+		$lineCounter++;
+
+		# Activity log
+		#console_log("Read $lineCounter lines from STDIN.") if ($lineCounter%80000 == 0);
+
+		# Split the line
+		my @logParts = split(' ');
+
+		# Check if lines are erroneous, i.e. incorrect number of parts
+		if ($#logParts != 9) {
+			$errorLines++;
+			console_log("Invalid log data at line $lineCounter. Error #$errorLines.");
+		}
+
+		# Skip irrelevant lines
+		elsif (($logParts[0] >= $logStart) && ($i < 288)) {
+
+			# Gets the x value correct
+			while ($logStart + (300 * ($i + 1)) < $logParts[0]) { $i++; }
+
+			# Declare vars
+			my $isTCP = 0;
+			my $isUDP = 0;
+			my $isHit = 0;
+			my $isMiss = 0;
+
+			# Is this a hit or miss?
+			$isHit = 1 if ($logParts[3] =~ /HIT/);
+			$isMiss = 1 if ($logParts[3] =~ /MISS/);
+
+			# Protocol check
+			if ($logParts[3] =~ /TCP/) { $isTCP = 1 if ($have_tcp); }
+			elsif ($logParts[3] =~ /UDP/) { $isUDP = 1 if ($have_udp); }
+
+			# Unknown protocol? Can't be!
+			else {
+				$errorLines++;
+				console_log("Invalid log data at line $lineCounter. Error #$errorLines.");
+			}
+
+			# Collect data
+			if ($isTCP) {
+				$tcpAccessTotal[$i]++;
+				$tcpTransferTotal[$i] += $logParts[4];
+				$tcpTimeTotal[$i] += $logParts[1]/1000;
+				if ($isHit) {
+					$tcpAccessHit[$i]++;
+					$tcpTransferHit[$i] += $logParts[4];
+					$tcpTimeHit[$i] += $logParts[1]/1000;
+					if ($logParts[3] =~ /IMS/) {
+						$tcpAccessIMS[$i]++;
+						$tcpTransferIMS[$i] += $logParts[4];
+					}
+				}
+				elsif ($isMiss) {
+					$tcpAccessMiss[$i]++;
+					$tcpTransferMiss[$i] += $logParts[4];
+					$tcpTimeMiss[$i] += $logParts[1]/1000;
+				}
+			}
+			elsif ($isUDP) {
+				$udpAccessTotal[$i]++;
+				$udpTransferTotal[$i] += $logParts[4];
+				$udpTimeTotal[$i] += $logParts[1]/1000;
+				if ($isHit) {
+					$udpAccessHit[$i]++;
+					$udpTransferHit[$i] += $logParts[4];
+					$udpTimeHit[$i] += $logParts[1]/1000;
+				}
+				elsif ($isMiss) {
+					$udpAccessMiss[$i]++;
+					$udpTransferMiss[$i] += $logParts[4];
+					$udpTimeMiss[$i] += $logParts[1]/1000;
+				}
+			}
+
+			# Undefine vars
+			undef $isTCP;
+			undef $isUDP;
+			undef $isHit;
+			undef $isMiss;
+		}
+
+		undef @logParts;
+	}
+
+	# Calculate transfer duration averages
+	if ($have_transfer) {
+		# Activity log
+		console_log("Calculating averages for TCP/UDP transfer duration.");
+
+		# Start looping
+		my $i;
+		for ($i = 0; $i < 288; $i++) {
+			if ($have_tcp) {
+				$tcpTimeTotal[$i] = ($tcpAccessTotal[$i] == 0)?0:$tcpTimeTotal[$i]/$tcpAccessTotal[$i];
+				$tcpTimeHit[$i] = ($tcpAccessHit[$i] == 0)?0:$tcpTimeHit[$i]/$tcpAccessHit[$i];
+				$tcpTimeMiss[$i] = ($tcpAccessMiss[$i] == 0)?0:$tcpTimeMiss[$i]/$tcpAccessMiss[$i]; 
+			}
+			if ($have_udp) {
+				$udpTimeTotal[$i] = ($udpAccessTotal[$i] == 0)?0:$udpTimeTotal[$i]/$udpAccessTotal[$i];
+				$udpTimeHit[$i] = ($udpAccessHit[$i] == 0)?0:$udpTimeHit[$i]/$udpAccessHit[$i];
+				$udpTimeMiss[$i] = ($udpAccessMiss[$i] == 0)?0:$udpTimeMiss[$i]/$udpAccessMiss[$i];
+			}
+		}
+		undef $i;
+	}
+
+	# Cumulate the data
+	if ($have_cumulative) {
+		# Activity log
+		console_log("Cumulating log data for TCP/UDP graphs.");
+
+		# Start looping
+		my $i;
+		for ($i = 0; $i < 288; $i++) {
+			if ($have_tcp) {
+				$tcpAccessTotal[$i + 1] += $tcpAccessTotal[$i];
+				$tcpAccessHit[$i + 1] += $tcpAccessHit[$i];
+				$tcpAccessMiss[$i + 1] += $tcpAccessMiss[$i];
+				$tcpAccessIMS[$i + 1] += $tcpAccessIMS[$i];
+				$tcpTransferTotal[$i + 1] += $tcpTransferTotal[$i];
+				$tcpTransferHit[$i + 1] += $tcpTransferHit[$i];
+				$tcpTransferMiss[$i + 1] += $tcpTransferMiss[$i];
+				$tcpTransferIMS[$i + 1] += $tcpTransferIMS[$i];
+			}
+			if ($have_udp) {
+				$udpAccessTotal[$i + 1] += $udpAccessTotal[$i];
+				$udpAccessHit[$i + 1] += $udpAccessHit[$i];
+				$udpAccessMiss[$i + 1] += $udpAccessMiss[$i];
+				$udpTransferTotal[$i + 1] += $udpTransferTotal[$i];
+				$udpTransferHit[$i + 1] += $udpTransferHit[$i];
+				$udpTransferMiss[$i + 1] += $udpTransferMiss[$i];
+			}
+		}
+		undef $i;
+	}
+
+	# Done parsing, now calculate some stats
+	$duration = time() - $progStart;
+	$duration = 1 if ($duration <= 0);
+	$progSpeed = dec_truncate($lineCounter/$duration,2);
+
+	# Do some console logging
+	console_log("Done reading $lineCounter lines from logfile on STDIN. ($errorLines errors)");
+	console_log("Analysis duration is $duration seconds, $progSpeed lines/sec.");
+
+	# Create image objects
+	if ($have_tcp) {
+		console_log('Creating TCP image objects.');
+		$tcpAccessImg = create_gd();
+		$tcpTransferImg = create_gd();
+		$tcpTimeImg = create_gd() if ($have_transfer);
+	}
+	if ($have_udp) {
+		console_log('Creating UDP image objects.');
+		$udpAccessImg = create_gd();
+		$udpTransferImg = create_gd();
+		$udpTimeImg = create_gd() if ($have_transfer);
+	}
+
+	# Plot the graphs
+	my $c;
+	my @nullArr;
+	$c = 'C' if ($have_cumulative);
+	if ($have_tcp) {
+		console_log("Plotting graph of TCP accesses.");
+		plot("TA$c", $logStart, $tcpAccessImg,@tcpAccessTotal,@tcpAccessHit,@tcpAccessMiss,@tcpAccessIMS);
+		console_log("Plotting graph of TCP transfers.");
+		plot("TX$c", $logStart, $tcpTransferImg,@tcpTransferTotal,@tcpTransferHit,@tcpTransferMiss,@tcpAccessIMS);
+		if ($have_transfer) {
+			console_log("Plotting graph of TCP transfer duration.");
+			plot("TD", $logStart, $tcpTimeImg,@tcpTimeTotal,@tcpTimeHit,@tcpTimeMiss,@nullArr);
+		}
+	}
+	if ($have_udp) {
+		console_log("Plotting graph of UDP accesses.");
+		plot("UA$c", $logStart, $udpAccessImg,@udpAccessTotal,@udpAccessHit,@udpTransferMiss,@nullArr);
+		console_log("Plotting graph of UDP transfers.");
+		plot("UX$c", $logStart, $udpTransferImg,@udpTransferTotal,@udpTransferHit,@udpTransferMiss,@nullArr);
+		if ($have_transfer) {
+			console_log("Plotting graph of UDP transfer duration.");
+			plot("UD", $logStart, $udpTimeImg,@udpTimeTotal,@udpTimeHit,@udpTimeMiss,@nullArr);
+		}
+	}
+	undef @nullArr;
+	undef $c;
+
+	# Graph plotted! Now we save it
+	if ($have_tcp) {
+		write_img($tcpAccessImg,'tcp-access.png');
+		write_img($tcpTransferImg,'tcp-transfer.png');
+		write_img($tcpTimeImg,'tcp-duration.png') if ($have_transfer);
+	}
+	if ($have_udp) {
+		write_img($udpAccessImg,'udp-access.png');
+		write_img($udpTransferImg,'udp-transfer.png');
+		write_img($udpTimeImg,'udp-duration.png') if ($have_transfer);
+	}
+
+	# Time to gather additional statistics which are not on the graph :)
+	console_log("Gathering additional statistics.");
+
+	my $tcpAccessTotals = 0;
+	my $tcpAccessAverage = 0;
+
+	my $tcpAccessMissTotals = 0;
+	my $tcpAccessMissPercentage = 0;
+	my $tcpAccessMissAverage = 0;
+
+	my $tcpAccessHitTotals = 0;
+	my $tcpAccessHitPercentage = 0;
+	my $tcpAccessHitAverage = 0;
+
+	my $tcpAccessIMSTotals = 0;
+	my $tcpAccessIMSPercentage = 0;
+	my $tcpAccessIMSAverage = 0;
+
+	my $tcpTransferTotals = 0;
+	my $tcpTransferAverage = 0;
+
+	my $tcpTransferHitTotals = 0;
+	my $tcpTransferHitPercentage = 0;
+	my $tcpTransferHitAverage = 0;
+
+	my $tcpTransferMissTotals = 0;
+	my $tcpTransferMissPercentage = 0;
+	my $tcpTransferMissAverage = 0;
+
+	my $tcpTransferIMSTotals = 0;
+	my $tcpTransferIMSPercentage = 0;
+	my $tcpTransferIMSAverage = 0;
+
+	my $tcpTimeTotals = 0;
+	my $tcpTimeAverage = 0;
+	my $tcpTimeHitTotals = 0;
+	my $tcpTimeHitAverage = 0;
+	my $tcpTimeMissTotals = 0;
+	my $tcpTimeMissAverage = 0;
+
+	my $udpAccessTotals = 0;
+	my $udpAccessAverage = 0;
+
+	my $udpAccessMissTotals = 0;
+	my $udpAccessMissPercentage = 0;
+	my $udpAccessMissAverage = 0;
+
+	my $udpAccessHitTotals = 0;
+	my $udpAccessHitPercentage = 0;
+	my $udpAccessHitAverage = 0;
+
+	my $udpTransferTotals = 0;
+	my $udpTransferAverage = 0;
+
+	my $udpTransferMissTotals = 0;
+	my $udpTransferMissPercentage = 0;
+	my $udpTransferMissAverage = 0;
+
+	my $udpTransferHitTotals = 0;
+	my $udpTransferHitPercentage = 0;
+	my $udpTransferHitAverage = 0;
+
+	my $udpTimeTotals = 0;
+	my $udpTimeAverage = 0;
+	my $udpTimeHitTotals = 0;
+	my $udpTimeHitAverage = 0;
+	my $udpTimeMissTotals = 0;
+	my $udpTimeMissAverage = 0;
+
+
+	# Get the totals
+
+	if ($have_cumulative) {
+		if ($have_tcp) {
+			$tcpAccessTotals = $tcpAccessTotal[$#tcpAccessTotal];
+			$tcpAccessHitTotals = $tcpAccessHit[$#tcpAccessHit];
+			$tcpAccessMissTotals = $tcpAccessMiss[$#tcpAccessMiss];
+			$tcpAccessIMSTotals = $tcpAccessIMS[$#tcpAccessIMS];
+
+			$tcpTransferTotals = $tcpTransferTotal[$#tcpTransferTotal];
+			$tcpTransferHitTotals = $tcpTransferHit[$#tcpTransferHit];
+			$tcpTransferMissTotals = $tcpTransferMiss[$#tcpTransferMiss];
+			$tcpTransferIMSTotals = $tcpTransferIMS[$#tcpTransferIMS];
+		}
+		if ($have_udp) {
+			$udpAccessTotals = $udpAccessTotal[$#udpAccessTotal];
+			$udpAccessHitTotals = $udpAccessHit[$#udpAccessHit];
+			$udpAccessMissTotals = $udpAccessMiss[$#udpAccessMiss];
+
+			$udpTransferTotals = $udpTransferTotal[$#udpTransferTotal];
+			$udpTransferHitTotals = $udpTransferHit[$#udpTransferHit];
+			$udpTransferMissTotals = $udpTransferMiss[$#udpTransferMiss];
+		}
+
+	}
+	else {
+		my $i;
+		for ($i = 0; $i < 288; $i++) {
+			if ($have_tcp) {
+				$tcpAccessTotals += $tcpAccessTotal[$i];
+				$tcpAccessHitTotals += $tcpAccessHit[$i];
+				$tcpAccessMissTotals += $tcpAccessMiss[$i];
+				$tcpAccessIMSTotals += $tcpAccessIMS[$i];
+
+				$tcpTransferTotals += $tcpTransferTotal[$i];
+				$tcpTransferHitTotals += $tcpTransferHit[$i];
+				$tcpTransferMissTotals += $tcpTransferMiss[$i];
+				$tcpTransferIMSTotals += $tcpTransferIMS[$i];
+
+				if ($have_transfer) {
+					$tcpTimeTotals += $tcpTimeTotal[$i];
+					$tcpTimeHitTotals += $tcpTimeHit[$i];
+					$tcpTimeMissTotals += $tcpTimeMiss[$i];
+				}
+			}
+
+			if ($have_udp) {
+				$udpAccessTotals += $udpAccessTotal[$i];
+				$udpAccessHitTotals += $udpAccessHit[$i];
+				$udpAccessMissTotals += $udpAccessMiss[$i];
+
+				$udpTransferTotals += $udpTransferTotal[$i];
+				$udpTransferHitTotals += $udpTransferHit[$i];
+				$udpTransferMissTotals += $udpTransferMiss[$i];
+
+				if ($have_transfer) {
+					$udpTimeTotals += $udpTimeTotal[$i];
+					$udpTimeHitTotals += $udpTimeHit[$i];
+					$udpTimeMissTotals += $udpTimeMiss[$i];
+				}
+			}
+		}
+		undef $i;
+	}
+
+	# Calculate averages and percentages
+
+	sub percentage($$) {
+		my $val = shift;
+		my $tot = shift;
+		return dec_truncate(($tot == 0)?0:(($val/$tot) * 100),2);
+	};
+
+	if ($have_tcp) {
+			$tcpAccessAverage = dec_truncate($tcpAccessTotals/24,2);
+			$tcpAccessHitAverage = dec_truncate($tcpAccessHitTotals/24,2);
+			$tcpAccessMissAverage = dec_truncate($tcpAccessMissTotals/24,2);
+			$tcpAccessIMSAverage = dec_truncate($tcpAccessIMSTotals/24,2);
+
+			$tcpTransferAverage = hr_bytes($tcpTransferTotals/24);
+			$tcpTransferHitAverage = hr_bytes($tcpTransferHitTotals/24);
+			$tcpTransferMissAverage = hr_bytes($tcpTransferMissTotals/24);
+			$tcpTransferIMSAverage = hr_bytes($tcpTransferIMSTotals/24);
+
+			$tcpAccessHitPercentage = percentage($tcpAccessHitTotals,$tcpAccessTotals);
+			$tcpAccessMissPercentage = percentage($tcpAccessMissTotals,$tcpAccessTotals);
+
+			$tcpTransferHitPercentage = percentage($tcpTransferHitTotals,$tcpTransferTotals);
+			$tcpTransferMissPercentage = percentage($tcpTransferMissTotals,$tcpTransferTotals);
+
+			if ($have_transfer) {
+				$tcpTimeAverage = dec_truncate($tcpTimeTotals/288,2);
+				$tcpTimeHitAverage = dec_truncate($tcpTimeHitTotals/288,2);
+				$tcpTimeMissAverage = dec_truncate($tcpTimeMissTotals/288,2);
+			}
+	}
+
+	if ($have_udp) {
+			$udpAccessAverage = dec_truncate($udpAccessTotals/24,2);
+			$udpAccessHitAverage = dec_truncate($udpAccessHitTotals/24,2);
+			$udpAccessMissAverage = dec_truncate($udpAccessMissTotals/24,2);
+
+			$udpTransferAverage = hr_bytes($udpTransferTotals/24);
+			$udpTransferHitAverage = hr_bytes($udpTransferHitTotals/24);
+			$udpTransferMissAverage = hr_bytes($udpTransferMissTotals/24);
+
+			$udpAccessHitPercentage = percentage($udpAccessHitTotals,$udpAccessTotals);
+			$udpAccessMissPercentage = percentage($udpAccessMissTotals,$udpAccessTotals);
+
+			$udpTransferHitPercentage = percentage($udpTransferHitTotals,$udpTransferTotals);
+			$udpTransferMissPercentage = percentage($udpTransferMissTotals,$udpTransferTotals);
+
+			if ($have_transfer) {
+				$udpTimeAverage = dec_truncate($udpTimeTotals/288,2);
+				$udpTimeHitAverage = dec_truncate($udpTimeHitTotals/288,2);
+				$udpTimeMissAverage = dec_truncate($udpTimeMissTotals/288,2);
+			}
+	}
+
+	# Some tiny date/time conversions
+	my $progStartTime = localtime($progStart);
+	my $logStartTime = localtime($logStart);
+	my $logEndTime = localtime($logStart + 86400);
+
+	# Colours
+	my $bgcolor = "$color{'hbg'}[0]$color{'hbg'}[1]$color{'hbg'}[2]";
+	my $fgcolor = "$color{'fg'}[0]$color{'fg'}[1]$color{'fg'}[2]";
+	my $grcolor = "$color{'gr'}[0]$color{'gr'}[1]$color{'gr'}[2]";
+	my $hitcolor = "$color{'hit'}[0]$color{'hit'}[1]$color{'hit'}[2]";
+	my $misscolor = "$color{'miss'}[0]$color{'miss'}[1]$color{'miss'}[2]";
+	my $imscolor = "$color{'ims'}[0]$color{'ims'}[1]$color{'ims'}[2]" if ($have_tcp);
+
+	# Make some things more redable to the human eye
+	if ($have_tcp) {
+		$tcpAccessTotals = dec_truncate($tcpAccessTotals,2);
+		$tcpAccessHitTotals = dec_truncate($tcpAccessHitTotals,2);
+		$tcpAccessMissTotals = dec_truncate($tcpAccessMissTotals,2);
+		$tcpAccessIMSTotals = dec_truncate($tcpAccessIMSTotals,2);
+		$tcpTransferTotals = hr_bytes($tcpTransferTotals);
+		$tcpTransferHitTotals = hr_bytes($tcpTransferHitTotals);
+		$tcpTransferMissTotals = hr_bytes($tcpTransferMissTotals);
+		$tcpTransferIMSTotals = hr_bytes($tcpTransferIMSTotals);
+	}
+	if ($have_udp) {
+		$udpAccessTotals = dec_truncate($udpAccessTotals,2);
+		$udpAccessHitTotals = dec_truncate($udpAccessHitTotals,2);
+		$udpAccessMissTotals = dec_truncate($udpAccessMissTotals,2);
+		$udpTransferTotals = hr_bytes($udpTransferTotals);
+		$udpTransferHitTotals = hr_bytes($udpTransferHitTotals);
+		$udpTransferMissTotals = hr_bytes($udpTransferMissTotals);
+	}
+
+
+	console_log("Writing index.html file.");
+
+	open(IDX, ">$config{'output-dir'}/index.html") ||
+		error("Can't write to file $config{'output-dir'}/index.html. Check directory permissions?");
+
+	print IDX "<HTML>\n";
+	print IDX "<HEAD>\n";
+	print IDX "<TITLE>$title</TITLE>\n";
+	print IDX "</HEAD>\n";
+	print IDX "<BODY BGCOLOR=\"#$bgcolor\" TEXT=\"#$fgcolor\">\n";
+	print IDX "<H1>$title</H1>\n";
+	print IDX "<BR>\n";
+
+	print IDX "<TABLE BORDER=0>\n";
+	print IDX "<TR><TD><B>Generated:</B></TD><TD>$progStartTime</TD></TR>\n";
+	print IDX "<TR><TD><B>Lines Analyzed:</B></TD><TD>$lineCounter lines ($errorLines errors)</TD></TR>\n";
+	print IDX "<TR><TD><B>Analysis Duration:</B></TD><TD>$duration seconds</TD></TR>\n";
+	print IDX "<TR><TD><B>Analysis Speed:</B></TD><TD>$progSpeed lines/sec</TD></TR>\n";
+	print IDX "<TR><TD><B>Graph Start:</B></TD><TD>$logStartTime</TD></TR>\n";
+	print IDX "<TR><TD><B>Graph End:</B></TD><TD>$logEndTime</TD></TR>\n";
+	print IDX "<TR><TD><B>Graph Domain:</B></TD><TD>24 hours (86400 seconds)</TD></TR>\n";
+	print IDX "</TABLE>\n";
+
+	sub generate_html_row($$$) {
+		my $color = shift;
+		my $key = shift;
+		my $value = shift;
+		my $ret;
+
+		$ret = "<TR>";
+		$ret .= "<TD ALIGN=RIGHT><FONT SIZE=-1 COLOR=#$color><B>$key:</B></FONT></TD>";
+		$ret .= "<TD ALIGN=LEFT><FONT SIZE=-1>$value</FONT></TD>";
+		$ret .= "</TR>\n";
+
+		undef $color;
+		undef $key;
+		undef $value;
+
+		return $ret;
+	}
+
+	if ($have_tcp) {
+		print IDX "<BR><HR><BR>\n";
+		print IDX "<H3>Graph of TCP Accesses (5 minute total)</H3>\n" if (!$have_cumulative);
+		print IDX "<H3>Cumulative graph of TCP Accesses</H3>\n" if ($have_cumulative);
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX "<TR>\n";
+		print IDX "<TD><IMG SRC=tcp-access.png></TD>\n";
+		print IDX "<TD>\n";
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX generate_html_row($grcolor,"Total Accesses",$tcpAccessTotals);
+		print IDX generate_html_row($grcolor,"Average Accesses","$tcpAccessAverage per hour");
+		print IDX generate_html_row($hitcolor,"Total Cache Hits",$tcpAccessHitTotals);
+		print IDX generate_html_row($hitcolor,"Average Cache Hits","$tcpAccessHitAverage per hour");
+		print IDX generate_html_row($hitcolor,"% Cache Hits","$tcpAccessHitPercentage %");
+		print IDX generate_html_row($imscolor,"Total Cache IMS Hits",$tcpAccessIMSTotals);
+		print IDX generate_html_row($imscolor,"Average Cache IMS Hits","$tcpAccessIMSAverage per hour");
+		print IDX generate_html_row($misscolor,"Total Cache Misses",$tcpAccessMissTotals);
+		print IDX generate_html_row($misscolor,"Average Cache Misses","$tcpAccessMissAverage per hour");
+		print IDX generate_html_row($misscolor,"% Cache Misses","$tcpAccessMissPercentage %");
+		print IDX "</TABLE>\n";
+		print IDX "</TD>\n";
+		print IDX "</TR>\n";
+		print IDX "</TABLE>\n";
+		print IDX "<H3>Graph of TCP Transfers (5 minute total)</H3>\n" if (!$have_cumulative);
+		print IDX "<H3>Cumulative graph of TCP Transfers</H3>\n" if ($have_cumulative);
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX "<TR>\n";
+		print IDX "<TD><IMG SRC=tcp-transfer.png></TD>\n";
+		print IDX "<TD>\n";
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX generate_html_row($grcolor,"Total Transfers",$tcpTransferTotals);
+		print IDX generate_html_row($grcolor,"Average Transfers","$tcpTransferAverage per hour");
+		print IDX generate_html_row($hitcolor,"Total Cache Hits",$tcpTransferHitTotals);
+		print IDX generate_html_row($hitcolor,"Average Cache Hits","$tcpTransferHitAverage per hour");
+		print IDX generate_html_row($hitcolor,"% Cache Hits","$tcpTransferHitPercentage %");
+		print IDX generate_html_row($imscolor,"Total Cache IMS Hits",$tcpTransferIMSTotals);
+		print IDX generate_html_row($imscolor,"Average Cache IMS Hits","$tcpTransferIMSAverage per hour");
+		print IDX generate_html_row($misscolor,"Total Cache Misses",$tcpTransferMissTotals);
+		print IDX generate_html_row($misscolor,"Average Cache Misses","$tcpTransferMissAverage per hour");
+		print IDX generate_html_row($misscolor,"% Cache Misses","$tcpTransferMissPercentage %");
+		print IDX "</TABLE>\n";
+		print IDX "</TD>\n";
+		print IDX "</TR>\n";
+		print IDX "</TABLE>\n";
+		if ($have_transfer) {
+			print IDX "<H3>Graph of Average TCP Transfer Duration</H3>\n";
+			print IDX "<TABLE BORDER=0>\n";
+			print IDX "<TR>\n";
+			print IDX "<TD><IMG SRC=tcp-duration.png></TD>\n";
+			print IDX "<TD>\n";
+			print IDX "<TABLE BORDER=0>\n";
+			print IDX generate_html_row($grcolor,"Avg. Transfer Duration","$tcpTimeAverage seconds");
+			print IDX generate_html_row($hitcolor,"Avg. Cache Hit Duration","$tcpTimeHitAverage seconds");
+			print IDX generate_html_row($misscolor,"Avg. Cache Miss Duration","$tcpTimeMissAverage seconds");
+			print IDX "</TABLE>\n";
+			print IDX "</TD>\n";
+			print IDX "</TR>\n";
+			print IDX "</TABLE>\n";
+		}
+	}
+
+	if ($have_udp) {
+		print IDX "<BR><HR><BR>\n";
+		print IDX "<H3>Graph of UDP Accesses (5 minute total)</H3>\n" if (!$have_cumulative);
+		print IDX "<H3>Cumulative graph of UDP Accesses</H3>\n" if ($have_cumulative);
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX "<TR>\n";
+		print IDX "<TD><IMG SRC=udp-access.png></TD>\n";
+		print IDX "<TD>\n";
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX generate_html_row($grcolor,"Total Accesses",$udpAccessTotals);
+		print IDX generate_html_row($grcolor,"Average Accesses","$udpAccessAverage per hour");
+		print IDX generate_html_row($hitcolor,"Total Cache Hits",$udpAccessHitTotals);
+		print IDX generate_html_row($hitcolor,"Average Cache Hits","$udpAccessHitAverage per hour");
+		print IDX generate_html_row($hitcolor,"% Cache Hits","$udpAccessHitPercentage %");
+		print IDX generate_html_row($misscolor,"Total Cache Misses",$udpAccessMissTotals);
+		print IDX generate_html_row($misscolor,"Average Cache Misses","$udpAccessMissAverage per hour");
+		print IDX generate_html_row($misscolor,"% Cache Misses","$udpAccessMissPercentage %");
+		print IDX "</TABLE>\n";
+		print IDX "</TD>\n";
+		print IDX "</TR>\n";
+		print IDX "</TABLE>\n";
+		print IDX "<H3>Graph of UDP Transfers (5 minute total)</H3>\n" if (!$have_cumulative);
+		print IDX "<H3>Cumulative graph of UDP Transfers</H3>\n" if ($have_cumulative);
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX "<TR>\n";
+		print IDX "<TD><IMG SRC=udp-transfer.png></TD>\n";
+		print IDX "<TD>\n";
+		print IDX "<TABLE BORDER=0>\n";
+		print IDX generate_html_row($grcolor,"Total Transfers",$udpTransferTotals);
+		print IDX generate_html_row($grcolor,"Average Transfers","$udpTransferAverage per hour");
+		print IDX generate_html_row($hitcolor,"Total Cache Hits",$udpTransferHitTotals);
+		print IDX generate_html_row($hitcolor,"Average Cache Hits","$udpTransferHitAverage per hour");
+		print IDX generate_html_row($hitcolor,"% Cache Hits","$udpTransferHitPercentage %");
+		print IDX generate_html_row($misscolor,"Total Cache Misses",$udpTransferMissTotals);
+		print IDX generate_html_row($misscolor,"Average Cache Misses","$udpTransferMissAverage per hour");
+		print IDX generate_html_row($misscolor,"% Cache Misses","$udpTransferMissPercentage %");
+		print IDX "</TABLE>\n";
+		print IDX "</TD>\n";
+		print IDX "</TR>\n";
+		print IDX "</TABLE>\n";
+		if ($have_transfer) {
+			print IDX "<H3>Graph of Average UDP Transfer Duration</H3>\n";
+			print IDX "<TABLE BORDER=0>\n";
+			print IDX "<TR>\n";
+			print IDX "<TD><IMG SRC=udp-duration.png></TD>\n";
+			print IDX "<TD>\n";
+			print IDX "<TABLE BORDER=0>\n";
+			print IDX generate_html_row($grcolor,"Avg. Transfer Duration","$udpTimeAverage seconds");
+			print IDX generate_html_row($hitcolor,"Avg. Cache Hit Duration","$udpTimeHitAverage seconds");
+			print IDX generate_html_row($misscolor,"Avg. Cache Miss Duration","$udpTimeMissAverage seconds");
+			print IDX "</TABLE>\n";
+			print IDX "</TD>\n";
+			print IDX "</TR>\n";
+			print IDX "</TABLE>\n";
+		}
+	}
+
+	print IDX <<EOF;
+
+<BR>
+<HR>
+<BR>
+
+<A HREF="http://squid-graph.sourceforge.net/"><IMG SRC="logo.png" BORDER="0"></A>
+<BR>
+version $VER
+
+</BODY>
+
+</HTML>
+EOF
+	close(IDX);
+
+	console_log("Done.");
+	console_log("Remember to copy logo.png found in your Squid Graph images/ directory to $config{'output-dir'}!");
+
+}
+
+# Error output
+sub error($) {
+	my $LOG = shift;
+	die "ERROR: $LOG Exiting.\n";
+}
+
+# Warning output
+sub warning($) {
+	my $LOG = shift;
+	print STDERR "WARNING: $LOG\n";
+	undef $LOG;
+}
+
+# Just for console logging
+sub console_log($) {
+	if ($CONSOLELOG) {
+		my $TIME = localtime(time());
+		my $LOG = shift;
+		print "[$TIME] $LOG\n";
+		undef $LOG;
+	}
+}
+
+# Help
+sub help() {
+print <<EOF;
+
+Squid Graph $VER Help ($^O, perl $])
+
+Usage examples:
+  squid-graph [options] < logfile.log
+  cat logfile.log | squid-graph [options]
+  tail -n 10000 logfile.log | squid-graph [options]
+
+Command line options (options marked * are compulsary):
+
+    * --output-dir=output-dir (or -o=output-dir)
+        Specifies the directory which stores the output files.
+
+      --start=start-time (or -s=start-time)
+        Specifies the graph start time in seconds since 1970.
+        When not specified, 24 hours before the current time is
+        used as default.
+
+      --end=end-time (or -e=end-time)
+        Specifies the graph end time in seconds since 1970.
+        When not specified, the current time is used as default.
+
+      --title="report-title"
+        Specifies the report title. When not specified, "Squid
+        Graph Logfile Analysis Report" is used as default.
+
+      --tcp-only
+        Specifies that only TCP access and transfer graphs are
+        generated. When not specified, both TCP and UDP graphs
+        are generated.
+
+      --udp-only
+        Specifies that only UDP access and transfer graphs are
+        generated. When not specified, both TCP and UDP graphs
+        are generated.
+
+      --cumulative (or -c)
+        Enables generation of cumulative graphs instead of the
+        default histograms.
+
+      --no-transfer-duration (or -d)
+        Disables plotting of average transfer duration graph(s).
+
+      --no-console-log (or -n)
+        Disables logging of messages to console.
+
+      --help (or -h)
+        Displays this help message.
+
+For more info, please visit http://squid-graph.sourceforge.net/
+
+EOF
+exit;
+}
+
+# Parse command line arguments
+sub parse_argv() {
+
+	# no arguments?
+	if ($#ARGV == -1) {
+		&help;
+	}
+
+	# scan command line arguments
+	foreach (@ARGV) {
+		my @parms = split(/=/);
+
+		if (($parms[0] eq "--help") || ($parms[0] eq "-h")) {
+			help();
+		}
+		elsif (($parms[0] eq "--no-console-log") || ($parms[0] eq "-n")) {
+			$CONSOLELOG = 0;
+		}
+		elsif (($parms[0] eq "--output-dir") || ($parms[0] eq "-o")) {
+			if ($parms[1] eq "") {
+				error("Output directory cannot be blank.");
+			}
+			elsif (-e $parms[1]) {
+				$config{'output-dir'} = $parms[1];
+			}
+			else {
+				error("Output directory $parms[1] does not exist.");
+			}
+		}
+		elsif (($parms[0] eq "--start") || ($parms[0] eq "-s")) {
+			if ($parms[1] eq "") {
+				warning("Starting time cannot be blank. Using defaults.");
+			}
+			else {
+				$config{'start'} = $parms[1];
+			}
+		}
+		elsif (($parms[0] eq "--end") || ($parms[0] eq "-e")) {
+			if ($parms[1] eq "") {
+				warning("End time cannot be blank. Using defaults.");
+			}
+			else {
+				$config{'end'} = $parms[1];
+			}	
+		}
+		elsif ($parms[0] eq "--title") {
+			if ($parms[1] eq "") {
+				warning("Title cannot be blank. Using defaults.");
+			}
+			else {
+				$config{'title'} = $parms[1];
+			}
+		}
+		elsif ($parms[0] eq "--tcp-only") { $config{'tcp-only'} = 1; }
+		elsif ($parms[0] eq "--udp-only") { $config{'udp-only'} = 1; }
+		elsif (($parms[0] eq "--cumulative") || ($parms[0] eq "-c")) { $config{'cumulative'} = 1; }
+		elsif (($parms[0] eq "--no-transfer-duration") || ($parms[0] eq "-d")) { $config{'no-transfer-duration'} = 1; }
+		elsif (($parms[0] eq "--no-console-log") || ($parms[0] eq "-n")) { $CONSOLELOG = 0; }
+		else {
+			warning("Unknown argument $_ from command line.");
+		}
+
+		undef @parms;
+	}
+}
+
+# Checks configuration validity
+sub config_check() {
+	my $noerror = 1;
+
+	if ($config{'output-dir'} eq "") {
+		warning("Output directory not configured.");
+		$noerror = 0;
+	}
+	else {
+		# Remove trailing slash in output dir
+		my $tmp = $config{'output-dir'};
+		if (chop($tmp) eq "/") {
+			chop($config{'output-dir'});
+		}
+	}
+
+	if ((exists $config{'start'}) && (exists $config{'end'})) {
+		warning("Cannot specify both --start and --end values. Use either --start OR --end.");
+		$noerror = 0;
+	}
+
+	if ((exists $config{'udp-only'}) && (exists $config{'tcp-only'})) {
+		warning("Both --udp-only and --tcp-only specified. Are you nuts? That's the default!");
+		$noerror = 0;
+	}
+
+	if (($config{'output-dir'} =~ /^\/tmp/) ||
+		($config{'output-dir'} eq '.') ||
+		($config{'output-dir'} =~ /^\.\//) ||
+		($config{'output-dir'} =~ /^\/dev/)) {
+		warning("Are you sure you want to output your files to \"$config{'output-dir'}\"? Continuing anyway...");
+	}
+
+	return $noerror;
+}
+
+# Create blank GD Images
+sub create_gd() {
+	my $IMG;
+	my $width = 370;
+	my $height = 240;
+	
+	$IMG = new GD::Image($width,$height);
+	$IMG->interlaced('true');
+	$IMG->rectangle(0,0,$width-1,$height-1,
+		$IMG->colorAllocate(hex($color{'bg'}[0]),hex($color{'bg'}[1]),hex($color{'bg'}[2])));
+
+	undef $width;
+	undef $height;
+
+	return $IMG;
+}
+
+# Write images
+sub write_img($$) {
+	my $IMG = shift;
+	my $filename = shift;
+
+	console_log("Writing to file $config{'output-dir'}/$filename");
+	open(GD, ">$config{'output-dir'}/$filename") ||
+		error("Cannot write to file $config{'output-dir'}/$filename. Check directory permissions?");
+	binmode GD;
+	print GD $IMG->png();
+	close(GD);
+}
+
+sub plot($$\$\@\@\@\@) {
+	my $type = shift;
+	my $logStart = shift;
+	my $imgRef = shift;
+	my $totalRef = shift;
+	my $hitRef = shift;
+	my $missRef = shift;
+	my $imsRef = shift;
+	my ($isTCP, $isUDP) = (0,0);
+	my $isCum = 0;
+	my ($width, $height) = $$imgRef->getBounds();
+	my $font = gdSmallFont;
+	my $fontWidth = $font->width();
+	my $fontHeight = $font->height();
+
+	# Check type options
+	$isCum = 1 if ($type =~ /C/);
+	$isTCP = 1 if ($type =~ /T/);
+	$isUDP = 1 if ($type =~ /U/);
+
+	# Colour tables
+	my $fgcolor   = $$imgRef->colorAllocate(hex($color{'fg'}[0]),hex($color{'fg'}[1]),hex($color{'fg'}[2]));
+	my $grcolor   = $$imgRef->colorAllocate(hex($color{'gr'}[0]),hex($color{'gr'}[1]),hex($color{'gr'}[2]));
+	my $hitcolor  = $$imgRef->colorAllocate(hex($color{'hit'}[0]),hex($color{'hit'}[1]),hex($color{'hit'}[2]));
+	my $misscolor = $$imgRef->colorAllocate(hex($color{'miss'}[0]),hex($color{'miss'}[1]),hex($color{'miss'}[2]));
+	my $imscolor  = $$imgRef->colorAllocate(hex($color{'ims'}[0]),hex($color{'ims'}[1]),hex($color{'ims'}[2]));
+
+	# Dotted brush
+	$$imgRef->setStyle($fgcolor,gdTransparent,gdTransparent);
+
+	#
+	# NOTES
+	#
+	# graph area w/h = 288/200
+	# graph area l/t = 62/20
+	# graph area eff = 62,20,350,220
+	#
+
+	# Draw the border
+	$$imgRef->rectangle(0,0,$width-1,$height-1,$fgcolor);
+	
+	# Draw the title at the left side
+	my $title;
+	$title = "Cumulative " if ($isCum);
+	$title = "Average " if ($type =~ /D/);
+	$title .= "TCP " if ($isTCP);
+	$title .= "UDP " if ($isUDP);
+	$title .= "Accesses" if ($type =~ /A/);
+	$title .= "Transfers (bytes)" if ($type =~ /X/);
+	$title .= "Transfer Duration (secs)" if ($type =~ /D/);
+	my $titlewidth = ($fontWidth * length($title));
+	my $titlestart = ((($height - $titlewidth) / 2) + $titlewidth);
+	$$imgRef->stringUp($font,5,$titlestart,$title,$fgcolor);
+	undef $titlewidth;
+	undef $titlestart;
+	undef $title;
+
+	# Determine the maximal and per pixel size of the graph
+	my ($graphMax) = sort {$b <=> $a} @$totalRef;
+	if ((sort {$b <=> $a} @$hitRef)[0] > $graphMax) {
+		$graphMax = (sort {$b <=> $a} @$hitRef)[0];
+	}
+	if ((sort {$b <=> $a} @$missRef)[0] > $graphMax) {
+		$graphMax = (sort {$b <=> $a} @$missRef)[0];
+	}
+	# Over-estimate max by 0.5%
+	$graphMax = ($graphMax < 1)?1:$graphMax * 1.05;
+	my $dotSize = $graphMax / 200;
+
+	# Plot the graph
+	my $i;
+	my $lastTotalPos = 0;
+	my $lastHitPos = 0;
+	my $lastMissPos = 0;
+	my $lastIMSPos = 0;
+	for ($i = 0; $i < 288; $i++) {
+		my $totalPos = int($$totalRef[$i] / $dotSize);
+		my $hitPos = int($$hitRef[$i] / $dotSize);
+		my $missPos = int($$missRef[$i] / $dotSize);
+		my $imsPos;
+		$imsPos = int($$imsRef[$i] / $dotSize) if ($isTCP);
+
+		# Draw in sequence. Drawing later will make line appear "on-top"
+		$$imgRef->line($i + 62, 219 - $lastIMSPos, $i + 63, 219 - $imsPos, $imscolor) if ($isTCP);
+		$$imgRef->line($i + 62, 219 - $lastMissPos, $i + 63, 219 - $missPos, $misscolor);
+		$$imgRef->line($i + 62, 219 - $lastHitPos, $i + 63, 219 - $hitPos, $hitcolor);
+		$$imgRef->line($i + 62, 219 - $lastTotalPos, $i + 63, 219 - $totalPos, $grcolor);
+		
+		$lastTotalPos = $totalPos;
+		$lastHitPos = $hitPos;
+		$lastMissPos = $missPos;
+		$lastIMSPos = $imsPos if ($isTCP);
+		undef $totalPos;
+		undef $hitPos;
+		undef $missPos;
+		undef $imsPos;
+	}
+	undef $i;
+	undef $lastTotalPos;
+	undef $lastHitPos;
+	undef $lastMissPos;
+	undef $lastIMSPos;
+
+	# Draw the graph plotting area bounding boxes and quarter markings
+	$$imgRef->line(62,70,350,70,gdStyled);
+	$$imgRef->line(62,120,350,120,gdStyled);
+	$$imgRef->line(62,170,350,170,gdStyled);
+	$$imgRef->rectangle(62,20,350,220,$fgcolor);
+
+	# Label the vertical (Y) axis
+	my $Q = $graphMax/4;
+	my $Q1 = hr_digits($graphMax,hr_units($graphMax));
+	my $Q2 = hr_digits($Q * 3,hr_units($graphMax));
+	my $Q3 = hr_digits($Q * 2,hr_units($graphMax));
+	my $Q4 = hr_digits($Q * 1,hr_units($graphMax));
+
+	$$imgRef->string($font,58-(length($Q1)*$fontWidth),20-($fontHeight/2),"$Q1",$fgcolor);
+	$$imgRef->string($font,58-(length($Q2)*$fontWidth),70-($fontHeight/2),"$Q2",$fgcolor);
+	$$imgRef->string($font,58-(length($Q3)*$fontWidth),120-($fontHeight/2),"$Q3",$fgcolor);
+	$$imgRef->string($font,58-(length($Q4)*$fontWidth),170-($fontHeight/2),"$Q4",$fgcolor);
+
+	$$imgRef->line(59,20,62,20,$fgcolor);
+	$$imgRef->line(59,70,62,70,$fgcolor);
+	$$imgRef->line(59,120,62,120,$fgcolor);
+	$$imgRef->line(59,170,62,170,$fgcolor);
+
+	# Write down the max value
+	# The max was overestimated. We shall get it again.
+	my ($graphMax) = sort {$b <=> $a} @$totalRef;
+	if ((sort {$b <=> $a} @$hitRef)[0] > $graphMax) {
+		$graphMax = (sort {$b <=> $a} @$hitRef)[0];
+	}
+	if ((sort {$b <=> $a} @$missRef)[0] > $graphMax) {
+		$graphMax = (sort {$b <=> $a} @$missRef)[0];
+	}
+	$graphMax = dec_truncate($graphMax,1);
+	$$imgRef->string($font,350-(length("Max: $graphMax") * $fontWidth),(20-$fontHeight)/2+1,"Max: $graphMax",$fgcolor);
+
+	undef $Q;
+	undef $Q1;
+	undef $Q2;
+	undef $Q3;
+	undef $Q4;
+
+	undef $dotSize;	
+	undef $graphMax;
+
+	# Label the horizontal (X) axis
+	my $i = 0;
+	my $alt = 0;
+	for ($i = 0; $i < 288; $i++) {
+		my ($sec, $min, $hour) = localtime($logStart + (300 * $i));
+		if (($min > 57) || ($min < 3)) {
+			$$imgRef->line(63 + $i, 20, 63 + $i, 220, gdStyled);
+			$$imgRef->line(63 + $i, 220, 63 + $i, 223, $fgcolor);
+			if ($alt) {
+				$$imgRef->string($font,63+$i-((length($hour) * $fontWidth)/2),224,"$hour",$fgcolor);
+				$alt = 0;
+			}
+			else { $alt = 1; }
+		}
+		undef $sec;
+		undef $min;
+		undef $hour;
+
+	}
+
+	undef $i;
+	undef $alt;
+
+
+	# Undefine all the vars used
+	undef $type;
+	undef $logStart;
+	undef $imgRef;
+	undef $totalRef;
+	undef $hitRef;
+	undef $missRef;
+	undef $imsRef;
+	undef $isTCP;
+	undef $isUDP;
+	undef $width;
+	undef $height;
+	undef $fgcolor;
+	undef $grcolor;
+	undef $hitcolor;
+	undef $misscolor;
+	undef $imscolor;
+
+}
+
+
+sub dec_truncate($$) {
+	my $num = shift;
+	my $dp = shift;
+	if ($dp eq '') {
+		$dp = 1;
+	}
+	my $power = 10;
+	my $i = 0;
+	for ($i = 1; $i < $dp; $i++) {
+		$power = $power * 10;
+	}
+	return int($num * $power)/$power;
+}
+
+sub comma_sep($) {
+	my $num = shift;
+	my $len = length($num);
+	my @str = split('', "$num");
+	my $val;
+	my $i;
+	for ($i = $len - 1; $i >= 0; $i--) {
+		if ((($len - $i - 1)%3 == 0) && ($i > 0) && ($i < $len - 1)) {
+			$val = "$str[$i]\,$val"
+		}
+		else {
+			$val = "$str[$i]$val";
+		}
+	}
+	undef $i;
+	undef $len;
+	undef $num;
+	undef @str;
+	return $val;
+}
+
+sub hr_units($) {
+	my $num = shift;
+	if ($num >= 1000000000) {
+		return 'G';
+	}
+	elsif ($num >= 1000000) {
+		return 'M';
+	}
+	elsif ($num >= 1000) {
+		return 'K';
+	}
+	else {
+		return '';
+	}
+}
+
+# hr_digits(int: $num, char: $units);
+sub hr_digits($$) {
+	my $num = shift;
+	my $unit = shift;
+	my $val = dec_truncate($num,1);
+
+	$val = dec_truncate($num/1000000000,1) if ($unit eq 'G');
+	$val = dec_truncate($num/1000000,1) if ($unit eq 'M');
+	$val = dec_truncate($num/1000,1) if ($unit eq 'K');
+
+	return "$val$unit";
+}
+
+sub hr_bytes($) {
+	my $num = shift;
+	my $val;
+	if ($num > 1000000000) {
+		$val = dec_truncate($num/1000000000,1);
+		return "$val Gb";
+	}
+	elsif ($num > 1000000) {
+		$val = dec_truncate($num/1000000,1);
+		return "$val Mb";
+	}
+	elsif ($num > 1000) {
+		$val = dec_truncate($num/1000,1);
+		return "$val Kb";
+	}
+	else {
+		$val = dec_truncate($num,1);
+		return "$val bytes";
+	}
+}
+
+# Undefine "global" vars
+undef %config;
+undef %color;
+undef $CONSOLELOG;
+undef $VER;

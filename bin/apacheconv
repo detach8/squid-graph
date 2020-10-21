@@ -1,0 +1,95 @@
+#!/usr/bin/perl
+
+######################################################################
+#
+# Squid Graph Apache to Squid Logfile Convertor
+#
+# Supplementary Tool for Squid Graph v3
+# https://github.com/detach8/squid-graph
+#
+# This program is distributed under the GNU General Public License
+# See LICENSE for full license information.
+#
+#####################################################################
+
+use strict;
+
+foreach (<STDIN>) {
+	my @parts = split(' ');
+
+	my $IP = $parts[0];
+	my $DATETIME = $parts[3];
+	my $OFFSET = $parts[4];
+	my $METHOD = $parts[5];
+	my $URL = $parts[6];
+	my $CODE = $parts[8];
+	my $SIZE = $parts[9];
+	my ($DATE, $HOUR, $MIN, $SEC) = split(/\:/, $DATETIME);
+	$DATE =~ s/\[//;
+	$OFFSET =~ s/\]//;
+	$METHOD =~ s/\"//;
+	$SIZE = 0 if ($SIZE eq "-"); 
+
+	my $JTIME = convert("$HOUR:$MIN:SEC",$DATE,($OFFSET/100));
+
+	print "$JTIME.000 0 $IP TCP_UNKNOWN/$CODE $SIZE $METHOD $URL - NONE/- -\n";
+
+	undef @parts;
+}
+
+sub convert($$$) {
+	my $TIME = shift;
+	my $DATE = shift;
+	my $OFFSET = shift;
+
+	$DATE =~ s/Jan/01/;
+	$DATE =~ s/Feb/02/;
+	$DATE =~ s/Mar/03/;
+	$DATE =~ s/Apr/04/;
+	$DATE =~ s/May/05/;
+	$DATE =~ s/Jun/06/;
+	$DATE =~ s/Jul/07/;
+	$DATE =~ s/Aug/08/;
+	$DATE =~ s/Sep/09/;
+	$DATE =~ s/Oct/10/;
+	$DATE =~ s/Nov/11/;
+	$DATE =~ s/Dec/12/;
+
+	my ($HOUR, $MIN, $SEC) = split(/:/, $TIME);
+	my ($DAY, $MONTH, $YEAR) = split(/\//, $DATE);
+
+	my $TOTAL = 0;
+
+	my $i = 0;
+	for ($i = 1; $i <= ($YEAR - 1970); $i++) {
+		$TOTAL += 31536000;
+		$TOTAL += 86400 if (isleap($i + 1970));
+	}
+	for ($i = 1; $i < $MONTH; $i++) {
+		$TOTAL += daysinmonth($i) * 86400;
+		$TOTAL += 86400 if ((isleap($YEAR)) && ($i == 2));
+	}
+	undef $i;
+
+	$TOTAL += ($DAY - 1) * 86400;
+	$TOTAL += $HOUR * 3600;
+	$TOTAL += $MIN * 60;
+	$TOTAL += $SEC;
+	$TOTAL -= $OFFSET * 3600;
+	
+	sub isleap($) {
+		my $YEAR = shift;
+		if ($YEAR%4 != 0) { return 0; }
+		elsif ($YEAR%400 == 0) { return 1; }
+		elsif ($YEAR%100 == 0) { return 0; }
+		else { return 1; }
+	}
+
+	sub daysinmonth($$) {
+		my $MONTH = shift;
+		my @DAYS = (0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
+		return $DAYS[$MONTH];
+	}
+
+	return $TOTAL;
+}

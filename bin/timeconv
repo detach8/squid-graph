@@ -1,0 +1,156 @@
+#!/usr/bin/perl
+
+######################################################################
+#
+# Squid Graph Time Converter
+#
+# Supplementary Tool for Squid Graph v3
+# https://github.com/detach8/squid-graph
+#
+# This program is distributed under the GNU General Public License
+# See LICENSE for full license information.
+#
+#####################################################################
+
+use strict;
+
+if ($#ARGV < 1) { usage(); }
+elsif (($ARGV[0] eq "-n") && ($#ARGV >= 2)) {
+	if (not exists $ARGV[3]) {
+		warn "GMT offset not given. Assuming time is in GMT.\n";
+		$ARGV[3] = 0;
+	}
+	if (length((split(/\//,$ARGV[2]))[2]) == 2) {
+		my ($DAY, $MONTH, $YEAR) = split(/\//, $ARGV[2]);
+		if ($YEAR >= 70) {
+			$YEAR += 1900;
+		}
+		else {
+			$YEAR += 2000;
+		}
+		warn "2 digit year provided. Assuming year provided is $YEAR.\n";
+		$ARGV[2] = "$DAY/$MONTH/$YEAR";
+	}
+	my $RESULT = convert($ARGV[1], $ARGV[2], $ARGV[3]);
+	print "$RESULT\n";
+}
+elsif (($ARGV[0] eq "-g") && ($#ARGV == 1)) {
+	my ($SEC, $MIN, $HOUR, $DAY, $MONTH, $YEAR) = gmtime($ARGV[1]);
+	$HOUR = zeropad($HOUR,2);
+	$MIN = zeropad($MIN,2);
+	$SEC = zeropad($SEC,2);
+	$DAY = zeropad($DAY,2);
+	$MONTH = zeropad($MONTH + 1,2);
+	$YEAR = $YEAR + 1900;
+	print "$HOUR:$MIN:$SEC $DAY/$MONTH/$YEAR GMT\n";
+}
+elsif (($ARGV[0] eq "-l") && ($#ARGV == 1)) {
+	my ($SEC, $MIN, $HOUR, $DAY, $MONTH, $YEAR) = localtime($ARGV[1]);
+	$HOUR = zeropad($HOUR,2);
+	$MIN = zeropad($MIN,2);
+	$SEC = zeropad($SEC,2);
+	$DAY = zeropad($DAY,2);
+	$MONTH = zeropad($MONTH + 1,2);
+	$YEAR = $YEAR + 1900;
+	print "$HOUR:$MIN:$SEC $DAY/$MONTH/$YEAR\n";
+}
+else { usage(); }
+
+sub usage() {
+	print "\n";
+	print "Squid Graph Time Converter\n";
+	print "\n";
+	print "Supplementary Tool for Squid Graph v3\n";
+	print "\n";
+	print "Utility to convert time from normal hh:mm:ss dd/mm/yyyy format to\n";
+	print "epoch time, and vice-versa.\n";
+	print "\n";
+	print "Usage:\n";
+	print "	$0 -n hh:mm:ss dd/mm/[yy]yy [offset]\n";
+	print "	$0 -g seconds-since-1970 (Outputs time is GMT)\n";
+	print "	$0 -l seconds-since-1970 (Outputs time is local time)\n";
+	print "\n";
+	print "E.g.:\n";
+	print "	$0 -n 12:04:22 12/10/2001 +8\n";
+	print "	$0 -n 12:04:22 12/10/01 +8\n";
+	print "	$0 -n 12:04:22 12/Oct/01 +8\n";
+	print "	$0 -g 9912334123\n";
+	print "	$0 -l 9912334123\n";
+	print "\n";
+	print "Please refer to the Squid Graph v3 documentation for more info.\n";
+	print "http://squid-graph.sourceforge.net/\n";
+	print "\n";
+}
+
+sub zeropad($$) {
+	my $NUM = shift;
+	my $LEN = shift;
+	return $NUM if ($LEN < length($NUM));
+	my $PAD = $LEN - length($NUM);
+	return $NUM if ($PAD == 0);
+	my $i;
+	my $OUT = '';
+	for ($i = 1; $i <= $PAD; $i++) {
+		$OUT = "0$OUT";
+	}
+	undef $i;
+	$OUT = "$OUT$NUM";
+	return $OUT;
+}
+
+sub convert($$$) {
+	my $TIME = shift;
+	my $DATE = shift;
+	my $OFFSET = shift;
+
+	$DATE =~ s/Jan/01/;
+	$DATE =~ s/Feb/02/;
+	$DATE =~ s/Mar/03/;
+	$DATE =~ s/Apr/04/;
+	$DATE =~ s/May/05/;
+	$DATE =~ s/Jun/06/;
+	$DATE =~ s/Jul/07/;
+	$DATE =~ s/Aug/08/;
+	$DATE =~ s/Sep/09/;
+	$DATE =~ s/Oct/10/;
+	$DATE =~ s/Nov/11/;
+	$DATE =~ s/Dec/12/;
+
+	my ($HOUR, $MIN, $SEC) = split(/:/, $TIME);
+	my ($DAY, $MONTH, $YEAR) = split(/\//, $DATE);
+
+	my $TOTAL = 0;
+
+	my $i = 0;
+	for ($i = 1; $i <= ($YEAR - 1970); $i++) {
+		$TOTAL += 31536000;
+		$TOTAL += 86400 if (isleap($i + 1970));
+	}
+	for ($i = 1; $i < $MONTH; $i++) {
+		$TOTAL += daysinmonth($i) * 86400;
+		$TOTAL += 86400 if ((isleap($YEAR)) && ($i == 2));
+	}
+	undef $i;
+
+	$TOTAL += ($DAY - 1) * 86400;
+	$TOTAL += $HOUR * 3600;
+	$TOTAL += $MIN * 60;
+	$TOTAL += $SEC;
+	$TOTAL -= $OFFSET * 3600;
+	
+	sub isleap($) {
+		my $YEAR = shift;
+		if ($YEAR%4 != 0) { return 0; }
+		elsif ($YEAR%400 == 0) { return 1; }
+		elsif ($YEAR%100 == 0) { return 0; }
+		else { return 1; }
+	}
+
+	sub daysinmonth($$) {
+		my $MONTH = shift;
+		my @DAYS = (0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
+		return $DAYS[$MONTH];
+	}
+
+	return $TOTAL;
+}
