@@ -4,6 +4,11 @@ Squid Graph is a free, simple, yet powerful Squid v2 logfile analysis
 tool that generates reports with graphical representation of the proxy
 server's traffic, somewhat like the popular MRTG tool.
 
+This project has been migrated from its original locations on SourceForge:
+
+http://squid-graph.sourceforge.net/ (1999-2006)
+https://sourceforge.net/projects/squid-graph/ (2006-2020)
+
 ## Sample Screenshots
 
 ### Full HTML output
